@@ -1,34 +1,61 @@
 #!/usr/bin/env bash
 
 # Initialisation des variables
+l_output=""
 l_remediation_output=""
 l_critical_partitions=("/tmp" "/var" "/home")
 l_mount_options=("nodev" "nosuid" "noexec")
 
-# Fonction pour remédier aux options de montage
-remediate_mount_options() {
+# Fonction pour vérifier et remédier aux options de montage
+check_and_remediate_mount_options() {
     local mount_point="$1"
+    local missing_options=()
+    local fstab_updated=false
     
-    # Ajouter les options de montage dans /etc/fstab
-    if ! grep -q "$mount_point" /etc/fstab; then
-        echo "$mount_point    $mount_point    tmpfs    defaults,nodev,nosuid,noexec    0 0" >> /etc/fstab
-        l_remediation_output="$l_remediation_output\n - Ajout de \"$mount_point\" à /etc/fstab avec les options appropriées."
+    # Récupérer les options de montage actuelles
+    mount_info=$(mount | grep "${mount_point} ")
+    
+    if [[ -z "$mount_info" ]]; then
+        l_output="$l_output\n - Partition: \"$mount_point\" n'est pas montée."
     else
-        # Modifier la ligne existante pour ajouter les options appropriées
-        sed -i.bak "s|^$mount_point.*|$mount_point    $mount_point    tmpfs    defaults,nodev,nosuid,noexec    0 0|" /etc/fstab
-        l_remediation_output="$l_remediation_output\n - Mise à jour de \"$mount_point\" dans /etc/fstab avec les options appropriées."
+        options=$(echo "$mount_info" | awk '{print $6}' | tr -d '()')
+        
+        # Vérifier les options manquantes
+        for option in "${l_mount_options[@]}"; do
+            if ! echo "$options" | grep -q "$option"; then
+                missing_options+=("$option")
+            fi
+        done
     fi
-
-    # Remonter la partition
-    mount -o remount "$mount_point"
+    
+    # Si des options sont manquantes, mise à jour de /etc/fstab et remonter la partition
+    if [[ ${#missing_options[@]} -gt 0 ]]; then
+        l_output="$l_output\n - Partition: \"$mount_point\" ne contient pas les options de montage: ${missing_options[*]}"
+        
+        # Vérifier si la partition est déjà dans /etc/fstab
+        if grep -q "${mount_point}" /etc/fstab; then
+            sed -i.bak "/${mount_point}/ s/defaults/defaults,${missing_options[*]}/" /etc/fstab
+        else
+            echo "$mount_point    tmpfs    defaults,${l_mount_options[*]}    0 0" >> /etc/fstab
+        fi
+        
+        mount -o remount,"${missing_options[*]}" "$mount_point"
+        l_remediation_output="$l_remediation_output\n - Remédiation appliquée sur \"$mount_point\" : ajout des options ${missing_options[*]}"
+    fi
 }
 
-# Remédiation des partitions critiques
+# Audit et remédiation des partitions critiques
 for partition in "${l_critical_partitions[@]}"; do
-    remediate_mount_options "$partition"
+    check_and_remediate_mount_options "$partition"
 done
 
 # Rapport des résultats
+if [ -z "$l_output" ]; then
+    echo -e "\nToutes les partitions critiques sont correctement montées avec les options appropriées."
+else
+    echo -e "\nProblèmes détectés :$l_output"
+fi
+
 if [ -n "$l_remediation_output" ]; then
     echo -e "\nRemédiation effectuée :$l_remediation_output"
 else
